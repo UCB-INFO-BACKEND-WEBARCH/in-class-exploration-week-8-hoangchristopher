@@ -11,12 +11,17 @@ from flask import Flask, jsonify, request
 import time
 import uuid
 from datetime import datetime
+from tasks import send_notification
+from rq.job import Job
+from redis import Redis
+import os
 
 app = Flask(__name__)
 
 # In-memory store for notifications
 notifications = {}
 
+redis_conn = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
 
 def send_notification_sync(notification_id, email, message):
     """
@@ -67,7 +72,6 @@ def create_notification():
 
     if not data or 'email' not in data:
         return jsonify({"error": "Email is required"}), 400
-
     # Create notification record
     notification_id = str(uuid.uuid4())
     email = data['email']
@@ -75,8 +79,11 @@ def create_notification():
 
     # THIS IS THE PROBLEM: We block here for 3 seconds!
     # The user can't do anything while we wait.
-    result = send_notification_sync(notification_id, email, message)
+    #result = send_notification_sync(notification_id, email, message)
 
+    job = send_notification.delay(notification_id, email, message)
+
+    '''
     notification = {
         "id": notification_id,
         "email": email,
@@ -84,9 +91,47 @@ def create_notification():
         "status": result['status'],
         "sent_at": result['sent_at']
     }
-    notifications[notification_id] = notification
+    '''
 
-    return jsonify(notification), 201
+    notification = {
+        "id": notification_id,
+        "email": email,
+        "message": message,
+        "status": "queued",
+        "sent_at": time.time()
+    }
+    notifications[notification["id"]] = notification
+
+    return jsonify({
+        "message" : "Notification queued",
+        "notification_id" : notification_id,
+        "job_id" : job.id
+    }), 202
+
+@app.route('/jobs/<job_id>', methods=['GET'])
+def get_status(job_id):
+    """Get job status"""
+
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+    except Exception:
+        return jsonify({"error": "Job not found"}), 404
+    
+    status = job.get_status()
+
+    response = {
+        "job_id" : job.id,
+        "status" : status
+    }
+
+    if status == "finished":
+        response["result"] = job.result
+    elif status == "failed":
+        response["failed"] = "Job failed"
+
+    return jsonify(response), 200
+    
+
 
 
 @app.route('/notifications', methods=['GET'])
